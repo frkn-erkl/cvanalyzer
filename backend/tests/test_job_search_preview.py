@@ -60,6 +60,17 @@ def test_preview_job_search_builds_actor_payloads(monkeypatch) -> None:
     assert len(preview.apify_actors) == 2
     linkedin = next(item for item in preview.apify_actors if item.source == "linkedin")
     assert linkedin.actor_id == "linkedin/search"
-    assert linkedin.run_input["maxItems"] == 5
-    assert linkedin.run_input["location"] == "Istanbul"
-    assert "queries" in linkedin.run_input
+    assert linkedin.run_input["count"] == 10
+    assert linkedin.run_input["scrapeCompany"] is True
+    assert linkedin.run_input["splitByLocation"] is False
+    assert len(linkedin.run_input["urls"]) >= 1
+    assert linkedin.run_input["urls"][0].startswith("https://www.linkedin.com/jobs/search/?")
+
+    kariyer = next(item for item in preview.apify_actors if item.source == "kariyer")
+    assert kariyer.actor_id == "kariyer/search"
+    assert kariyer.run_input["keyword"] == "Backend Developer"
+    assert kariyer.run_input["startUrls"] == ["https://www.kariyer.net/is-ilanlari/istanbul"]
+    assert kariyer.run_input["results_wanted"] == 5
+    assert kariyer.run_input["max_job_age"] == "all"
+    assert kariyer.run_input["proxyConfiguration"] == {"useApifyProxy": False}
+    assert "location" not in kariyer.run_input

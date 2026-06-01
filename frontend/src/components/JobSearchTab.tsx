@@ -310,13 +310,28 @@ export default function JobSearchTab({ llmProvider, onLlmProviderChange, onAnaly
                       </div>
                     </div>
                     {listing.matched_skills.length > 0 && (
-                      <div className="chips">
-                        {listing.matched_skills.map((skill) => (
-                          <span className="chip ok" key={`${listing.url}-${skill}`}>
-                            {skill}
-                          </span>
-                        ))}
-                      </div>
+                      <SkillChipGroup
+                        skills={listing.matched_skills}
+                        title="Eşleşen yetenekler"
+                        tone="ok"
+                        url={listing.url}
+                      />
+                    )}
+                    {listing.missing_required_skills.length > 0 && (
+                      <SkillChipGroup
+                        skills={listing.missing_required_skills}
+                        title="Eksik zorunlu yetenekler"
+                        tone="danger"
+                        url={listing.url}
+                      />
+                    )}
+                    {listing.missing_preferred_skills.length > 0 && (
+                      <SkillChipGroup
+                        skills={listing.missing_preferred_skills}
+                        title="Eksik tercih edilen yetenekler"
+                        tone="warn"
+                        url={listing.url}
+                      />
                     )}
                     {listing.description_preview && <p>{listing.description_preview}</p>}
                   </article>
@@ -334,6 +349,31 @@ export default function JobSearchTab({ llmProvider, onLlmProviderChange, onAnaly
           </article>
         </section>
       )}
+    </div>
+  );
+}
+
+function SkillChipGroup({
+  skills,
+  title,
+  tone,
+  url,
+}: {
+  skills: string[];
+  title: string;
+  tone: "ok" | "warn" | "danger";
+  url: string;
+}) {
+  return (
+    <div className="skill-chip-group">
+      <span className="skill-chip-title">{title}</span>
+      <div className="chips">
+        {skills.map((skill) => (
+          <span className={`chip ${tone}`} key={`${url}-${title}-${skill}`}>
+            {skill}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }

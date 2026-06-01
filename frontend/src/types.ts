@@ -130,6 +130,8 @@ export type JobListingMatch = {
   url: string;
   fit_score: number;
   matched_skills: string[];
+  missing_required_skills: string[];
+  missing_preferred_skills: string[];
   description_preview?: string | null;
   posted_at?: string | null;
 };

@@ -616,6 +616,18 @@ li {
   gap: 8px;
 }
 
+.skill-chip-group {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.skill-chip-title {
+  color: #5c667a;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .chip {
   border-radius: 999px;
   background: #eef2f8;

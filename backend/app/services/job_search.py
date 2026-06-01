@@ -21,6 +21,64 @@ from app.services.job_titles import suggest_job_titles
 from app.services.scoring import build_skill_matches, extract_cv_profile, extract_job_profile, score_match
 
 JobSearchSource = Literal["linkedin", "kariyer"]
+JOB_SEARCH_CACHE_VERSION = "job-search-v8"
+
+NON_TECH_TITLE_TERMS = (
+    "gayrimenkul",
+    "emlak",
+    "satış danışman",
+    "satis danisman",
+    "satış uzman",
+    "satis uzman",
+    "muhasebe",
+    "finans uzman",
+    "kahvaltı",
+    "kahvalti",
+    "aşçı",
+    "asci",
+    "garson",
+    "hemşire",
+    "hemsire",
+    "depo personel",
+    "kargo",
+    "lojistik",
+    "güvenlik görev",
+    "guvenlik gorev",
+    "temizlik",
+    "sekreter",
+    "hostes",
+    "komi",
+    "kasiyer",
+    "tezgahtar",
+    "forklift",
+    "tesisat",
+    "montaj",
+    "üretim",
+    "uretim",
+    "insaat",
+    "inşaat",
+    "nakliye",
+    "cagri merkezi",
+    "çağrı merkezi",
+    "turizm danışman",
+)
+
+SEARCH_STOPWORDS = frozenset(
+    {
+        "and",
+        "the",
+        "for",
+        "with",
+        "ve",
+        "ile",
+        "senior",
+        "junior",
+        "kidemli",
+        "mid",
+        "lead",
+        "staff",
+    }
+)
 
 
 async def _prepare_job_search(
@@ -248,7 +306,11 @@ async def search_jobs(
         client, normalized_sources, search_queries, location, max_per_source
     )
     warnings.extend(source_warnings)
-    ranked = await _rank_candidates(cv_document.text, cv_profile, candidates)
+    ranked = await _rank_candidates(cv_document.text, cv_profile, candidates, search_queries)
+    if candidates and not ranked:
+        warnings.append(
+            f"Apify {len(candidates)} ilan döndürdü ancak CV profiline uygun sonuç kalmadı; filtreler sıkılaştırıldı."
+        )
     result = JobSearchResult(
         listings=ranked[: max_per_source * max(1, len(normalized_sources))],
         search_queries=search_queries,
@@ -311,7 +373,7 @@ async def _fetch_candidates(
     for candidates, batch_warnings in batches:
         merged.extend(candidates)
         warnings.extend(batch_warnings)
-    return merged, warnings, True
+    return _dedupe_candidates(merged), warnings, True
 
 
 async def _run_source_search(
@@ -326,8 +388,16 @@ async def _run_source_search(
     try:
         items = await client.run_actor(actor_id, run_input)
         candidates = normalizer(items)
-        if not candidates:
-            warnings.append(f"{source} araması sonuç döndürmedi.")
+        if not candidates and items:
+            warnings.append(f"{source} araması {len(items)} kayıt döndürdü ancak beklenen alanlar bulunamadı.")
+        elif not candidates:
+            if source == "kariyer":
+                warnings.append(
+                    f"{source} araması sonuç döndürmedi. Kariyer actor API/proxy hatası olabilir; "
+                    "Apify run loglarını kontrol edin veya APIFY_TIMEOUT_SECONDS değerini artırın."
+                )
+            else:
+                warnings.append(f"{source} araması sonuç döndürmedi.")
         return candidates, warnings
     except ApifyError as exc:
         warnings.append(f"{source} Apify araması başarısız: {exc}")
@@ -338,6 +408,7 @@ async def _rank_candidates(
     cv_text: str,
     cv_profile,
     candidates: list[JobListingCandidate],
+    search_queries: list[str],
 ) -> list[JobListingMatch]:
     ranked: list[JobListingMatch] = []
     for candidate in candidates:
@@ -350,7 +421,9 @@ async def _rank_candidates(
             {"source": candidate.source},
             fast=True,
         )
-        matched, _, _ = build_skill_matches(cv_profile, job_profile)
+        matched, missing_required, missing_preferred = build_skill_matches(cv_profile, job_profile)
+        if _is_irrelevant_listing_for_profile(candidate, cv_profile, matched, search_queries):
+            continue
         ranked.append(
             JobListingMatch(
                 source=candidate.source,
@@ -360,6 +433,8 @@ async def _rank_candidates(
                 url=candidate.url,
                 fit_score=scores.overall,
                 matched_skills=[match.name for match in matched if match.matched][:8],
+                missing_required_skills=[match.name for match in missing_required][:8],
+                missing_preferred_skills=[match.name for match in missing_preferred][:8],
                 description_preview=candidate.description[:280],
                 posted_at=candidate.posted_at,
             )
@@ -368,23 +443,144 @@ async def _rank_candidates(
     return ranked
 
 
+def _is_irrelevant_listing_for_profile(
+    candidate: JobListingCandidate,
+    cv_profile,
+    matched_skills,
+    search_queries: list[str],
+) -> bool:
+    if not getattr(cv_profile, "skills", None):
+        return False
+    if matched_skills:
+        return False
+    if _matches_search_queries(candidate, search_queries):
+        return False
+    if _has_software_signal(candidate, cv_profile):
+        return False
+    return _has_non_technical_signal(candidate)
+
+
+def _dedupe_candidates(candidates: list[JobListingCandidate]) -> list[JobListingCandidate]:
+    deduped: list[JobListingCandidate] = []
+    seen_urls: set[str] = set()
+    for candidate in candidates:
+        key = candidate.url.casefold()
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
+def _matches_search_queries(candidate: JobListingCandidate, search_queries: list[str]) -> bool:
+    tokens = _search_query_tokens(search_queries)
+    if not tokens:
+        return False
+    text = _normalize_search_text(f"{candidate.title}\n{candidate.description}")
+    return any(token in text for token in tokens)
+
+
+def _search_query_tokens(search_queries: list[str]) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for query in search_queries:
+        for token in _normalize_search_text(query).split():
+            if len(token) < 4 or token in SEARCH_STOPWORDS:
+                continue
+            if token in seen:
+                continue
+            seen.add(token)
+            tokens.append(token)
+    return tokens
+
+
+def _has_non_technical_signal(candidate: JobListingCandidate) -> bool:
+    text = _normalize_search_text(f"{candidate.title}\n{candidate.description}")
+    return any(term in text for term in NON_TECH_TITLE_TERMS)
+
+
+def _has_software_signal(candidate: JobListingCandidate, cv_profile) -> bool:
+    text = _normalize_search_text(f"{candidate.title}\n{candidate.description}")
+    if any(_normalize_search_text(skill) in text for skill in cv_profile.skills):
+        return True
+    software_terms = (
+        "yazilim",
+        "software",
+        "developer",
+        "gelistirici",
+        "programci",
+        "backend",
+        "frontend",
+        "full stack",
+        "fullstack",
+        "mobile",
+        "mobil",
+        "flutter",
+        "react",
+        "javascript",
+        "typescript",
+        "python",
+        "java",
+        "node",
+        ".net",
+        "c#",
+        "devops",
+        "cloud",
+        "data engineer",
+        "veri muhendisi",
+        "data scientist",
+        "veri bilim",
+        "machine learning",
+        "yapay zeka",
+        "qa",
+        "test otomasyon",
+    )
+    return any(term in text for term in software_terms)
+
+
+def _normalize_search_text(value: str) -> str:
+    return value.casefold().replace("ı", "i").replace("ğ", "g").replace("ü", "u").replace("ş", "s").replace("ö", "o").replace("ç", "c")
+
+
 def _build_search_queries(suggestions, cv_profile) -> list[str]:
     queries: list[str] = []
     for suggestion in suggestions[:4]:
-        queries.append(suggestion.title)
-        queries.extend(suggestion.search_keywords[:3])
-    for skill in cv_profile.skills[:4]:
-        if skill not in queries:
-            queries.append(skill)
+        if isinstance(suggestion.title, str) and suggestion.title.strip():
+            queries.append(suggestion.title.strip())
+        for keyword in suggestion.search_keywords[:3]:
+            if isinstance(keyword, str) and _looks_like_job_title(keyword):
+                queries.append(keyword.strip())
     deduped: list[str] = []
     seen: set[str] = set()
     for query in queries:
         key = query.casefold()
-        if key in seen or len(query.strip()) < 2:
+        if key in seen or len(query) < 2:
             continue
         seen.add(key)
-        deduped.append(query.strip())
+        deduped.append(query)
     return deduped[:8] or ["software developer"]
+
+
+def _looks_like_job_title(value: str) -> bool:
+    normalized = value.strip().casefold()
+    role_terms = (
+        "developer",
+        "engineer",
+        "architect",
+        "analyst",
+        "specialist",
+        "consultant",
+        "manager",
+        "lead",
+        "mühendis",
+        "geliştirici",
+        "uzman",
+        "danışman",
+        "mimar",
+        "analist",
+        "yazılım",
+    )
+    return any(term in normalized for term in role_terms)
 
 
 def _normalize_sources(sources: list[JobSearchSource]) -> list[JobSearchSource]:
@@ -414,6 +610,7 @@ def _search_cache_key(
                 location or "",
                 str(max_results),
                 actor_fingerprint,
+                JOB_SEARCH_CACHE_VERSION,
             ]
         ).encode("utf-8")
     ).hexdigest()

@@ -22,8 +22,9 @@ def test_build_search_queries_deduplicates() -> None:
     queries = _build_search_queries(suggestions, FakeProfile())
 
     assert "Backend Developer" in queries
-    assert "python" in queries
-    assert "Docker" in queries
+    assert "Software Engineer" in queries
+    assert "python" not in queries
+    assert "Docker" not in queries
     assert len(queries) <= 8
 
 
@@ -157,7 +158,13 @@ def test_rank_candidates_orders_by_fit_score(monkeypatch) -> None:
         return breakdown, {}, []
 
     def fake_build_skill_matches(cv_profile, job_profile):
-        return [], [], []
+        from app.models import SkillMatch
+
+        return (
+            [SkillMatch(name="python", matched=True)],
+            [SkillMatch(name="docker", matched=False)],
+            [SkillMatch(name="kubernetes", matched=False)],
+        )
 
     monkeypatch.setattr("app.services.job_search.score_match", fake_score_match)
     monkeypatch.setattr("app.services.job_search.build_skill_matches", fake_build_skill_matches)
@@ -181,7 +188,113 @@ def test_rank_candidates_orders_by_fit_score(monkeypatch) -> None:
         ),
     ]
 
-    ranked = asyncio.run(_rank_candidates("Python CV " * 5, FakeProfile(), candidates))
+    ranked = asyncio.run(_rank_candidates("Python CV " * 5, FakeProfile(), candidates, ["Backend Developer"]))
 
     assert ranked[0].title == "Senior Dev"
     assert ranked[0].fit_score >= ranked[1].fit_score
+    assert ranked[0].matched_skills == ["python"]
+    assert ranked[0].missing_required_skills == ["docker"]
+    assert ranked[0].missing_preferred_skills == ["kubernetes"]
+
+
+def test_rank_candidates_filters_irrelevant_non_technical_titles(monkeypatch) -> None:
+    async def fake_score_match(cv_text, job_text, cv_profile, job_profile, metadata, **kwargs):
+        from app.models import ScoreBreakdown
+
+        breakdown = ScoreBreakdown(
+            overall=59,
+            technical_skills=70,
+            experience_seniority=75,
+            domain_keywords=20,
+            education_certifications=65,
+            language_communication=80,
+            ats_compatibility=80,
+        )
+        return breakdown, {}, []
+
+    def fake_build_skill_matches(cv_profile, job_profile):
+        return [], [], []
+
+    monkeypatch.setattr("app.services.job_search.score_match", fake_score_match)
+    monkeypatch.setattr("app.services.job_search.build_skill_matches", fake_build_skill_matches)
+
+    candidates = [
+        JobListingCandidate(
+            source="kariyer",
+            title="Kahvaltı Şefi",
+            company="Hotel",
+            location="İzmir",
+            url="https://www.kariyer.net/is-ilani/1",
+            description="Kahvaltı hazırlığı ve mutfak operasyonlarından sorumlu şef.",
+        ),
+        JobListingCandidate(
+            source="kariyer",
+            title="Gayrimenkul Danışmanı",
+            company="Real Estate",
+            location="İzmir",
+            url="https://www.kariyer.net/is-ilani/3",
+            description="Aktif satış ve müşteri portföyü yönetimi.",
+        ),
+        JobListingCandidate(
+            source="kariyer",
+            title="Muhasebe ve Finans Uzmanı",
+            company="Finance",
+            location="Mersin",
+            url="https://www.kariyer.net/is-ilani/4",
+            description="Muhasebe kayıtları ve finans raporlaması.",
+        ),
+        JobListingCandidate(
+            source="kariyer",
+            title="Yazılım Mühendisi",
+            company="Tech",
+            location="İzmir",
+            url="https://www.kariyer.net/is-ilani/2",
+            description="Yazılım geliştirme ekibinde görev alacak mühendis.",
+        ),
+    ]
+
+    ranked = asyncio.run(
+        _rank_candidates("Python FastAPI Docker CV " * 5, FakeProfile(), candidates, ["Yazılım Mühendisi"])
+    )
+
+    assert [item.title for item in ranked] == ["Yazılım Mühendisi"]
+
+
+def test_rank_candidates_keeps_listing_matching_search_query(monkeypatch) -> None:
+    async def fake_score_match(cv_text, job_text, cv_profile, job_profile, metadata, **kwargs):
+        from app.models import ScoreBreakdown
+
+        breakdown = ScoreBreakdown(
+            overall=62,
+            technical_skills=70,
+            experience_seniority=75,
+            domain_keywords=25,
+            education_certifications=65,
+            language_communication=80,
+            ats_compatibility=80,
+        )
+        return breakdown, {}, []
+
+    def fake_build_skill_matches(cv_profile, job_profile):
+        return [], [], []
+
+    monkeypatch.setattr("app.services.job_search.score_match", fake_score_match)
+    monkeypatch.setattr("app.services.job_search.build_skill_matches", fake_build_skill_matches)
+
+    candidates = [
+        JobListingCandidate(
+            source="kariyer",
+            title="Yazılım Mühendisi",
+            company="Tech",
+            location="İstanbul",
+            url="https://www.kariyer.net/is-ilani/10",
+            description="Agile ekip içinde yazılım geliştirme.",
+        )
+    ]
+
+    ranked = asyncio.run(
+        _rank_candidates("Python FastAPI Docker CV " * 5, FakeProfile(), candidates, ["Yazılım Mühendisi"])
+    )
+
+    assert len(ranked) == 1
+    assert ranked[0].title == "Yazılım Mühendisi"

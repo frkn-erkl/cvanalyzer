@@ -206,11 +206,7 @@ APIFY_TIMEOUT_SECONDS=120
 
 Actor ID'ler kodda sabitlenmez; [Apify Store](https://apify.com/store) üzerinden LinkedIn iş arama / iş detayı ve Kariyer.net actor'larını seçip `.env`'e yazın. Store'daki actor adları ve input şemaları zamanla değişebilir — README'deki örnekler yalnızca başlangıç noktasıdır.
 
-Önerilen arama türleri:
 
-- LinkedIn Jobs Search actor (store'dan `linkedin jobs` araması)
-- LinkedIn Job Details / Scraper actor (tek ilan URL'si)
-- Kariyer.net için store'da uygun actor (sınırlı olabilir; yoksa yalnızca LinkedIn ile MVP kullanılabilir)
 
 ### UI kullanımı
 
