@@ -17,6 +17,8 @@ from app.services.cv_rewrite import _parse_json_response
 from app.services.ingestion import validate_non_empty
 from app.services.language import ensure_english_for_llm
 from app.services.llm import get_llm_client
+from app.services.llm_progress import analysis_progress_callback, merge_thinking_metadata
+from app.services.skill_gaps import record_analysis_gaps
 
 _LLM_ANALYSIS_SYSTEM = (
     "You are an evidence-based career analysis assistant. "
@@ -74,6 +76,10 @@ async def run_llm_analysis(
 ) -> None:
     db.update_analysis(analysis_id, "running")
     try:
+        db.update_analysis_progress(
+            analysis_id,
+            {"thinking": "", "response": "", "phase": "thinking"},
+        )
         cv_document = await _ingest_cv(cv_text, cv_url, cv_file_content, cv_filename, cv_content_type)
         job_document = await _ingest_job(job_url, job_text, use_apify=use_apify)
         validate_non_empty(cv_document, "CV")
@@ -94,8 +100,11 @@ async def run_llm_analysis(
                 raise ValueError(f"{provider_label} kullanılamıyor: {detail.strip()}")
             raise ValueError(f"{provider_label} çalışmıyor veya gerekli LLM modeli yapılandırılmamış.")
 
-        llm_payload, llm_failure = await _generate_llm_analysis_payload(
-            cv_text_for_llm, job_text_for_llm, llm_provider=llm_provider
+        llm_payload, llm_failure, llm_thinking = await _generate_llm_analysis_payload(
+            cv_text_for_llm,
+            job_text_for_llm,
+            llm_provider=llm_provider,
+            analysis_id=analysis_id,
         )
         if llm_payload is None:
             raise ValueError(llm_failure or "LLM geçerli analiz JSON'u üretemedi.")
@@ -110,19 +119,28 @@ async def run_llm_analysis(
             "skill_matching": "llm",
             "summary": "llm",
         }
-        result.metadata = {
-            "cv": {**cv_document.metadata, "cache_key": cv_document.cache_key},
-            "job": {**job_document.metadata, "cache_key": job_document.cache_key},
-            "analysis_mode": "llm_only",
-            "deep_analysis": True,
-            "llm_provider": llm_provider,
-            "use_apify": use_apify,
-            "output_sources": output_sources,
-            "llm_translation": {
-                "cv": cv_lang_meta,
-                "job": job_lang_meta,
+        result.metadata = merge_thinking_metadata(
+            {
+                "cv": {**cv_document.metadata, "cache_key": cv_document.cache_key},
+                "job": {**job_document.metadata, "cache_key": job_document.cache_key},
+                "analysis_mode": "llm_only",
+                "deep_analysis": True,
+                "llm_provider": llm_provider,
+                "use_apify": use_apify,
+                "output_sources": output_sources,
+                "llm_translation": {
+                    "cv": cv_lang_meta,
+                    "job": job_lang_meta,
+                },
             },
-        }
+            llm_thinking,
+        )
+        record_analysis_gaps(
+            result=result,
+            job_metadata=job_document.metadata,
+            job_text=job_document.text,
+            source="llm_analysis",
+        )
         db.update_analysis(analysis_id, "completed", result=result.model_dump())
     except Exception as exc:  # noqa: BLE001 - persisted for UI visibility
         db.update_analysis(analysis_id, "failed", error=str(exc))
@@ -133,7 +151,8 @@ async def _generate_llm_analysis_payload(
     job_text: str,
     *,
     llm_provider: LlmProvider = "local",
-) -> tuple[dict | None, str | None]:
+    analysis_id: str,
+) -> tuple[dict | None, str | None, str | None]:
     settings = get_settings()
     prompt = _build_llm_analysis_prompt(
         cv_text[: settings.llm_analysis_cv_chars],
@@ -141,17 +160,34 @@ async def _generate_llm_analysis_payload(
     )
     provider_label = "Cursor API" if llm_provider == "cursor" else "Yerel LLM"
     last_failure = f"{provider_label} geçerli analiz JSON'u üretemedi."
+    last_thinking: str | None = None
+    on_progress = analysis_progress_callback(analysis_id)
+    client = get_llm_client(llm_provider)
 
     for attempt in range(2):
         num_predict = settings.llm_analysis_num_predict if attempt == 0 else settings.llm_analysis_num_predict + 1024
-        response = await get_llm_client(llm_provider).generate(
-            prompt,
-            system=_LLM_ANALYSIS_SYSTEM,
-            temperature=0.1 if attempt == 0 else 0.05,
-            num_predict=num_predict,
-            translate_input=False,
-            timeout_seconds=settings.llm_analysis_timeout_seconds,
-        )
+        if hasattr(client, "generate_detailed"):
+            detailed = await client.generate_detailed(
+                prompt,
+                system=_LLM_ANALYSIS_SYSTEM,
+                temperature=0.1 if attempt == 0 else 0.05,
+                num_predict=num_predict,
+                translate_input=False,
+                timeout_seconds=settings.llm_analysis_timeout_seconds,
+                on_progress=on_progress,
+            )
+            response = detailed.text
+            last_thinking = detailed.thinking or last_thinking
+        else:
+            response = await client.generate(
+                prompt,
+                system=_LLM_ANALYSIS_SYSTEM,
+                temperature=0.1 if attempt == 0 else 0.05,
+                num_predict=num_predict,
+                translate_input=False,
+                timeout_seconds=settings.llm_analysis_timeout_seconds,
+                on_progress=on_progress,
+            )
         if not response:
             last_failure = (
                 f"{provider_label} {int(settings.llm_analysis_timeout_seconds)} saniye içinde yanıt vermedi. "
@@ -168,11 +204,11 @@ async def _generate_llm_analysis_payload(
 
         normalized = _normalize_payload(payload)
         if _validate_payload(normalized):
-            return normalized, None
+            return normalized, None, last_thinking
 
         last_failure = f"{provider_label} yanıt verdi ancak beklenen analiz alanları eksik veya geçersiz."
 
-    return None, last_failure
+    return None, last_failure, last_thinking
 
 
 def _build_llm_analysis_prompt(cv_text: str, job_text: str) -> str:

@@ -2,6 +2,7 @@ import type { AnalysisResult as Result, LlmProvider, ScoreDetail } from "../type
 import CvAddSuggestionsPanel from "./CvAddSuggestionsPanel";
 import CvRewritePanel from "./CvRewritePanel";
 import LlmSummaryContent from "./LlmSummaryContent";
+import LlmThinkingPanel, { thinkingFromMetadata } from "./LlmThinkingPanel";
 import OutputSourceBadge, {
   analysisSectionSource,
   domainScoringSource,
@@ -33,9 +34,11 @@ export default function AnalysisResult({ result, llmProvider }: Props) {
   const skillSource = analysisSectionSource(result.metadata, "skill_matching");
   const profileSummarySource = analysisSectionSource(result.metadata, "profile_summary");
   const cvAddSource = analysisSectionSource(result.metadata, "cv_add_suggestions");
+  const storedThinking = thinkingFromMetadata(result.metadata);
 
   return (
     <section className="results">
+      {storedThinking && <LlmThinkingPanel storedThinking={storedThinking} />}
       <div className="score-card">
         <div>
           <div className="section-heading-row">

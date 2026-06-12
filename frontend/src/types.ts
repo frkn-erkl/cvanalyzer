@@ -71,11 +71,27 @@ export type AnalysisResult = {
   metadata: Record<string, unknown>;
 };
 
+export type LlmAnalysisProgress = {
+  thinking: string;
+  response?: string;
+  phase: "thinking" | "responding";
+};
+
+export type LlmTaskJob = {
+  id: string;
+  kind: "rewrite" | "job_titles" | "cv_edit" | "cv_edit_apply";
+  status: "queued" | "running" | "completed" | "failed";
+  error?: string | null;
+  progress?: LlmAnalysisProgress | null;
+  result?: Record<string, unknown> | null;
+};
+
 export type AnalysisJob = {
   id: string;
   status: "queued" | "running" | "completed" | "failed";
   error?: string | null;
   result?: AnalysisResult | null;
+  progress?: LlmAnalysisProgress | null;
 };
 
 export type CvRewriteRequest = {
@@ -118,6 +134,7 @@ export type CvRewriteResult = {
   compile_warnings: string[];
   used_llm: boolean;
   llm_requested?: boolean;
+  llm_thinking?: string | null;
   tone: CvRewriteRequest["tone"];
   language: CvRewriteRequest["language"];
 };
@@ -176,5 +193,65 @@ export type JobTitleSuggestionsResult = {
   current_titles: string[];
   used_llm: boolean;
   llm_requested?: boolean;
+  llm_thinking?: string | null;
   warnings: string[];
+};
+
+export type CvEditSuggestion = {
+  category: string;
+  title: string;
+  recommendation: string;
+  priority: "high" | "medium" | "low";
+  evidence: string[];
+};
+
+export type CvEditSuggestionsResult = {
+  overall_assessment: string;
+  suggestions: CvEditSuggestion[];
+  strengths: string[];
+  gaps: string[];
+  used_llm: boolean;
+  llm_requested?: boolean;
+  llm_thinking?: string | null;
+  warnings: string[];
+};
+
+export type CvEditApplyChange = {
+  section: string;
+  reason: string;
+  evidence: string[];
+};
+
+export type CvEditApplyResult = {
+  updated_cv_text: string;
+  changes: CvEditApplyChange[];
+  warnings: string[];
+  used_llm: boolean;
+  llm_requested?: boolean;
+  llm_thinking?: string | null;
+};
+
+export type SkillGapSource = "job_search" | "analysis" | "llm_analysis";
+export type SkillGapType = "required" | "preferred";
+
+export type SkillGapListingRef = {
+  job_key: string;
+  job_title: string;
+  job_url?: string | null;
+  company?: string | null;
+  source: SkillGapSource;
+  last_seen_at?: string | null;
+};
+
+export type SkillGapAggregate = {
+  skill_name: string;
+  gap_type: SkillGapType;
+  listing_count: number;
+  listings: SkillGapListingRef[];
+};
+
+export type SkillGapSummary = {
+  aggregates: SkillGapAggregate[];
+  total_skills: number;
+  total_listings: number;
 };

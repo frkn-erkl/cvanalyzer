@@ -1,4 +1,4 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { previewJobSearch, searchJobs } from "../api";
 import type { JobSearchPreviewResult, JobSearchResult, LlmProvider } from "../types";
 import LlmOptionToggle from "./LlmOptionToggle";
@@ -16,6 +16,34 @@ function sourceLabel(source: "linkedin" | "kariyer"): string {
   return source === "linkedin" ? "LinkedIn" : "Kariyer.net";
 }
 
+type ApifyPreviewDraft = {
+  searchQueriesText: string;
+  location: string;
+  actorInputs: Record<"linkedin" | "kariyer", string>;
+};
+
+function buildPreviewDraft(preview: JobSearchPreviewResult): ApifyPreviewDraft {
+  const actorInputs: Record<"linkedin" | "kariyer", string> = {
+    linkedin: "",
+    kariyer: "",
+  };
+  for (const actor of preview.apify_actors) {
+    actorInputs[actor.source] = JSON.stringify(actor.run_input, null, 2);
+  }
+  return {
+    searchQueriesText: preview.search_queries.join("\n"),
+    location: preview.location ?? "",
+    actorInputs,
+  };
+}
+
+function parseSearchQueries(text: string): string[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
 export default function JobSearchTab({ llmProvider, onLlmProviderChange, onAnalyzeJob }: Props) {
   const [cvMode, setCvMode] = useState<CvMode>("text");
   const [useApify, setUseApify] = useState(false);
@@ -26,8 +54,17 @@ export default function JobSearchTab({ llmProvider, onLlmProviderChange, onAnaly
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<JobSearchPreviewResult | null>(null);
+  const [previewDraft, setPreviewDraft] = useState<ApifyPreviewDraft | null>(null);
   const [pendingSearch, setPendingSearch] = useState<FormData | null>(null);
   const [result, setResult] = useState<JobSearchResult | null>(null);
+
+  useEffect(() => {
+    if (preview) {
+      setPreviewDraft(buildPreviewDraft(preview));
+    } else {
+      setPreviewDraft(null);
+    }
+  }, [preview]);
 
   function buildFormData(form: HTMLFormElement): FormData {
     const data = new FormData(form);
@@ -89,16 +126,58 @@ export default function JobSearchTab({ llmProvider, onLlmProviderChange, onAnaly
   }
 
   async function handleConfirmApifySearch() {
-    if (!pendingSearch) {
+    if (!pendingSearch || !previewDraft || !preview) {
       return;
     }
+
+    const queries = parseSearchQueries(previewDraft.searchQueriesText);
+    if (queries.length === 0) {
+      setError("En az bir arama sorgusu girmelisiniz.");
+      return;
+    }
+
+    const runInputs: Partial<Record<"linkedin" | "kariyer", Record<string, unknown>>> = {};
+    for (const actor of preview.apify_actors) {
+      const raw = previewDraft.actorInputs[actor.source].trim();
+      if (!raw) {
+        setError(`${sourceLabel(actor.source)} actor girdisi boş olamaz.`);
+        return;
+      }
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error("invalid");
+        }
+        runInputs[actor.source] = parsed as Record<string, unknown>;
+      } catch {
+        setError(`${sourceLabel(actor.source)} actor girdisi geçerli JSON değil.`);
+        return;
+      }
+    }
+
+    const requestData = new FormData();
+    for (const [key, value] of pendingSearch.entries()) {
+      if (typeof value === "string") {
+        requestData.set(key, value);
+      } else {
+        requestData.set(key, value);
+      }
+    }
+    requestData.set("search_queries_override", JSON.stringify(queries));
+    if (previewDraft.location.trim()) {
+      requestData.set("location_override", previewDraft.location.trim());
+    } else {
+      requestData.delete("location_override");
+    }
+    requestData.set("apify_run_inputs_override", JSON.stringify(runInputs));
 
     setBusy(true);
     setError(null);
     try {
-      const response = await searchJobs(pendingSearch);
+      const response = await searchJobs(requestData);
       setResult(response);
       setPreview(null);
+      setPreviewDraft(null);
       setPendingSearch(null);
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "Apify ilan araması başarısız oldu.");
@@ -109,6 +188,7 @@ export default function JobSearchTab({ llmProvider, onLlmProviderChange, onAnaly
 
   function handleCancelPreview() {
     setPreview(null);
+    setPreviewDraft(null);
     setPendingSearch(null);
   }
 
@@ -176,7 +256,7 @@ export default function JobSearchTab({ llmProvider, onLlmProviderChange, onAnaly
             </label>
           </div>
           <p className="hint">
-            Apify açıkken önce gönderilecek sorgular ve actor input&apos;ları listelenir; onayladıktan sonra arama başlar.
+            Apify açıkken önce gönderilecek sorgular ve actor girdileri önizlenir; düzenleyip onayladıktan sonra arama başlar.
           </p>
         </section>
 
@@ -187,13 +267,13 @@ export default function JobSearchTab({ llmProvider, onLlmProviderChange, onAnaly
 
       {error && <p className="error">{error}</p>}
 
-      {preview && (
+      {preview && previewDraft && (
         <section className="results job-search-preview">
           <article className="panel">
             <h2>Apify&apos;ye Gönderilecekler</h2>
             <p className="hint">
-              Kaynak başına en fazla {preview.max_results_per_source} ilan istenecek
-              {preview.location ? ` · Konum: ${preview.location}` : ""}.
+              Kaynak başına en fazla {preview.max_results_per_source} ilan istenecek. Aşağıdaki alanları Apify&apos;ye
+              göndermeden önce düzenleyebilirsiniz.
             </p>
 
             {preview.title_suggestions.length > 0 && (
@@ -223,24 +303,68 @@ export default function JobSearchTab({ llmProvider, onLlmProviderChange, onAnaly
             )}
 
             <div className="skill-group">
-              <h3>Birleştirilmiş arama sorguları</h3>
-              <div className="chips">
-                {preview.search_queries.map((query) => (
-                  <span className="chip" key={query}>
-                    {query}
-                  </span>
-                ))}
-              </div>
+              <label>
+                <h3>Arama sorguları</h3>
+                <span className="hint">Her satıra bir sorgu yazın.</span>
+                <textarea
+                  className="apify-edit-field"
+                  disabled={busy}
+                  onChange={(event) =>
+                    setPreviewDraft((current) =>
+                      current ? { ...current, searchQueriesText: event.target.value } : current,
+                    )
+                  }
+                  rows={Math.max(4, parseSearchQueries(previewDraft.searchQueriesText).length + 1)}
+                  value={previewDraft.searchQueriesText}
+                />
+              </label>
+            </div>
+
+            <div className="skill-group">
+              <label>
+                <h3>Konum</h3>
+                <input
+                  className="apify-edit-field"
+                  disabled={busy}
+                  onChange={(event) =>
+                    setPreviewDraft((current) => (current ? { ...current, location: event.target.value } : current))
+                  }
+                  placeholder="İstanbul, Remote..."
+                  type="text"
+                  value={previewDraft.location}
+                />
+              </label>
             </div>
 
             {preview.apify_actors.map((actor) => (
               <div className="skill-group" key={actor.source}>
-                <h3>
-                  {sourceLabel(actor.source)} actor
-                  {!actor.configured && <span className="warn"> · yapılandırılmamış</span>}
-                </h3>
-                <p className="hint">Actor ID: {actor.actor_id}</p>
-                <pre className="apify-payload">{JSON.stringify(actor.run_input, null, 2)}</pre>
+                <label>
+                  <h3>
+                    {sourceLabel(actor.source)} actor girdisi
+                    {!actor.configured && <span className="warn"> · yapılandırılmamış</span>}
+                  </h3>
+                  <p className="hint">Actor ID: {actor.actor_id}</p>
+                  <textarea
+                    className="apify-edit-field apify-payload-editor"
+                    disabled={busy}
+                    onChange={(event) =>
+                      setPreviewDraft((current) =>
+                        current
+                          ? {
+                              ...current,
+                              actorInputs: {
+                                ...current.actorInputs,
+                                [actor.source]: event.target.value,
+                              },
+                            }
+                          : current,
+                      )
+                    }
+                    rows={14}
+                    spellCheck={false}
+                    value={previewDraft.actorInputs[actor.source]}
+                  />
+                </label>
               </div>
             ))}
 

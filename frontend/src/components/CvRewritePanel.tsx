@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { rewriteCv, rewritePdfUrl } from "../api";
-import type { CvRewriteRequest, CvRewriteResult, LlmProvider } from "../types";
+import { isLlmTaskJob, supportsLiveLocalThinking, useLlmTaskPolling } from "../hooks/useLlmTaskPolling";
+import type { CvRewriteRequest, CvRewriteResult, LlmProvider, LlmTaskJob } from "../types";
 import LatexPreview from "./LatexPreview";
 import LlmOptionToggle from "./LlmOptionToggle";
+import LlmThinkingPanel from "./LlmThinkingPanel";
 import OutputSourceBadge, { rewriteOutputSource } from "./OutputSourceBadge";
 import SectionHeading from "./SectionHeading";
 
@@ -18,14 +20,30 @@ export default function CvRewritePanel({ analysisId, llmProvider }: Props) {
   const [preserveLatex, setPreserveLatex] = useState(true);
   const [compilePdf, setCompilePdf] = useState(true);
   const [result, setResult] = useState<CvRewriteResult | null>(null);
+  const [task, setTask] = useState<LlmTaskJob | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+
+  const showLiveThinking = busy && supportsLiveLocalThinking(llmProvider, deepRewrite);
+
+  useLlmTaskPolling(task?.id, busy && Boolean(task), {
+    onUpdate: setTask,
+    onFailed: (message) => {
+      setError(message);
+      setBusy(false);
+    },
+    onComplete: (completedTask) => {
+      setResult(completedTask.result as unknown as CvRewriteResult);
+      setBusy(false);
+    },
+  });
 
   async function handleRewrite() {
     setBusy(true);
     setError(null);
     setCopied(false);
+    setTask(null);
     try {
       const response = await rewriteCv(analysisId, {
         tone,
@@ -35,10 +53,14 @@ export default function CvRewritePanel({ analysisId, llmProvider }: Props) {
         compile_pdf: compilePdf,
         llm_provider: llmProvider,
       });
+      if (isLlmTaskJob(response)) {
+        setTask(response);
+        return;
+      }
       setResult(response);
+      setBusy(false);
     } catch (rewriteError) {
       setError(rewriteError instanceof Error ? rewriteError.message : "CV güncelleme üretilemedi.");
-    } finally {
       setBusy(false);
     }
   }
@@ -101,7 +123,13 @@ export default function CvRewritePanel({ analysisId, llmProvider }: Props) {
         </button>
       </div>
 
+      {showLiveThinking && (
+        <LlmThinkingPanel live progress={task?.progress} waiting={!task?.progress?.thinking && !task?.progress?.response} />
+      )}
+
       {error && <p className="error">{error}</p>}
+
+      {result?.llm_thinking && !busy && <LlmThinkingPanel storedThinking={result.llm_thinking} />}
 
       {result && (
         <div className="rewrite-result">

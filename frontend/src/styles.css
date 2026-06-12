@@ -39,6 +39,76 @@ textarea {
   gap: 20px;
 }
 
+.cv-edit-tab {
+  display: grid;
+  gap: 20px;
+}
+
+.guidance-field label {
+  display: grid;
+  gap: 8px;
+}
+
+.cv-edit-assessment {
+  margin: 0 0 16px;
+  color: #3d4659;
+  line-height: 1.6;
+}
+
+.cv-edit-summary-grid {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+@media (min-width: 720px) {
+  .cv-edit-summary-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.cv-edit-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.cv-apply-actions {
+  display: grid;
+  gap: 8px;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid #e4e8f0;
+}
+
+.cv-apply-result {
+  margin-top: 4px;
+}
+
+.priority-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.priority-high {
+  background: #fde8e8;
+  color: #b42318;
+}
+
+.priority-medium {
+  background: #fff4e5;
+  color: #b54708;
+}
+
+.priority-low {
+  background: #eef2ff;
+  color: #3538cd;
+}
+
 .job-title-results {
   margin-top: 0;
 }
@@ -681,6 +751,79 @@ li {
   margin-top: 12px;
 }
 
+.skill-gap-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.skill-gap-results {
+  display: grid;
+  gap: 16px;
+}
+
+.skill-gap-section {
+  margin-top: 0;
+}
+
+.skill-gap-list {
+  display: grid;
+  gap: 10px;
+}
+
+.skill-gap-row {
+  border: 1px solid #dbe3ef;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.skill-gap-row-header {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 0;
+  background: #f8fafc;
+  text-align: left;
+  cursor: pointer;
+}
+
+.skill-gap-row-header strong {
+  margin-right: 10px;
+}
+
+.skill-gap-toggle {
+  color: #475569;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.skill-gap-listings {
+  list-style: none;
+  margin: 0;
+  padding: 0 16px 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.skill-gap-listings li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  padding-top: 10px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.skill-gap-listings li:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
 .apify-payload {
   margin: 0;
   padding: 14px;
@@ -694,9 +837,114 @@ li {
   word-break: break-word;
 }
 
+.apify-edit-field {
+  width: 100%;
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  background: #fff;
+}
+
+.apify-payload-editor {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+  min-height: 220px;
+  resize: vertical;
+  white-space: pre;
+}
+
 .checkbox-group {
   display: flex;
   flex-wrap: wrap;
   gap: 16px;
   margin-top: 8px;
+}
+
+.llm-thinking {
+  margin-top: 20px;
+  border-color: #d8e0f0;
+}
+
+.llm-thinking.live {
+  border-color: #9eb6f5;
+  box-shadow: 0 0 0 1px rgba(79, 124, 255, 0.08);
+}
+
+.llm-thinking-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.llm-thinking-header h2 {
+  margin: 0;
+}
+
+.llm-thinking-phase {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #eef3ff;
+  color: #3559c7;
+}
+
+.llm-thinking-phase.responding {
+  background: #e8f8ef;
+  color: #1f7a45;
+}
+
+.llm-thinking-phase.waiting {
+  background: #f3f4f6;
+  color: #5c667a;
+}
+
+.llm-thinking-body {
+  max-height: 320px;
+  overflow: auto;
+  border-radius: 12px;
+  background: #0f172a;
+}
+
+.llm-thinking-body pre {
+  margin: 0;
+  padding: 14px;
+  color: #dbe4f3;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.llm-thinking-hint {
+  margin-top: 10px;
+  margin-bottom: 0;
+}
+
+.llm-thinking-waiting {
+  margin: 0;
+  padding: 14px;
+  color: #94a3b8;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.llm-thinking-section-label {
+  margin: 0;
+  padding: 10px 14px 0;
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.llm-thinking-response {
+  color: #86efac;
 }

@@ -1,9 +1,12 @@
+import json
+
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.config import LlmProvider, normalize_llm_provider
-from app.models import JobSearchPreviewResult, JobSearchResult
+from app.models import JobSearchPreviewResult, JobSearchResult, SkillGapSummaryResponse
 from app.services.apify_client import apify_health
 from app.services.job_search import JobSearchSource, preview_job_search, search_jobs
+from app.services.skill_gaps import clear_skill_gaps, get_skill_gap_summary
 
 
 router = APIRouter(tags=["jobs"])
@@ -11,6 +14,39 @@ router = APIRouter(tags=["jobs"])
 
 def _parse_bool(value: str) -> bool:
     return value.strip().lower() in {"true", "1", "on", "yes"}
+
+
+def _parse_search_queries_override(raw: str | None) -> list[str] | None:
+    if not raw or not raw.strip():
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, list):
+        queries = [str(item).strip() for item in parsed if str(item).strip()]
+        return queries or None
+    queries = [line.strip() for line in raw.splitlines() if line.strip()]
+    return queries or None
+
+
+def _parse_apify_run_inputs_override(raw: str | None) -> dict[str, dict] | None:
+    if not raw or not raw.strip():
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Apify actor girdileri geçerli JSON değil.") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("Apify actor girdileri bir JSON nesnesi olmalı.")
+    normalized: dict[str, dict] = {}
+    for key, value in parsed.items():
+        if key not in {"linkedin", "kariyer"}:
+            continue
+        if not isinstance(value, dict):
+            raise ValueError(f"{key} actor girdisi bir JSON nesnesi olmalı.")
+        normalized[key] = value
+    return normalized or None
 
 
 def _parse_sources(raw: str | None) -> list[JobSearchSource]:
@@ -27,6 +63,17 @@ def _parse_sources(raw: str | None) -> list[JobSearchSource]:
 @router.get("/apify/health")
 async def apify_health_endpoint() -> dict:
     return await apify_health()
+
+
+@router.get("/skill-gaps", response_model=SkillGapSummaryResponse)
+def skill_gaps_summary() -> SkillGapSummaryResponse:
+    return get_skill_gap_summary()
+
+
+@router.delete("/skill-gaps")
+def skill_gaps_clear() -> dict[str, str]:
+    clear_skill_gaps()
+    return {"status": "cleared"}
 
 
 async def _read_job_search_form(
@@ -105,6 +152,9 @@ async def job_search(
     language: str = Form(default="tr"),
     use_llm: str = Form(default="false"),
     llm_provider: str = Form(default="local"),
+    search_queries_override: str | None = Form(default=None),
+    location_override: str | None = Form(default=None),
+    apify_run_inputs_override: str | None = Form(default=None),
 ) -> JobSearchResult:
     params = await _read_job_search_form(
         cv_text, cv_url, cv_file, sources, location, max_results, language, use_llm, llm_provider
@@ -123,6 +173,9 @@ async def job_search(
             language=params["language"],  # type: ignore[arg-type]
             use_llm=params["use_llm"],
             llm_provider=params["llm_provider"],
+            search_queries_override=_parse_search_queries_override(search_queries_override),
+            location_override=location_override.strip() if location_override and location_override.strip() else None,
+            apify_run_inputs_override=_parse_apify_run_inputs_override(apify_run_inputs_override),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

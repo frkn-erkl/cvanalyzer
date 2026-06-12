@@ -1,4 +1,7 @@
+import json
 import math
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
@@ -7,12 +10,20 @@ import numpy as np
 from app.config import LlmProvider, get_settings, normalize_llm_provider
 from app.services.language import ensure_english_for_llm
 
+LlmProgressCallback = Callable[[str, str], None]
+
 
 def _model_installed(configured: str, installed_names: list[str]) -> bool:
     return any(
         name == configured or name.startswith(f"{configured}:")
         for name in installed_names
     )
+
+
+@dataclass(frozen=True)
+class LlmGenerateResult:
+    text: str | None
+    thinking: str | None = None
 
 
 class LlmClient(Protocol):
@@ -29,6 +40,7 @@ class LlmClient(Protocol):
         max_chars: int | None = None,
         translate_input: bool = True,
         timeout_seconds: float | None = None,
+        on_progress: LlmProgressCallback | None = None,
     ) -> str | None: ...
 
 
@@ -78,6 +90,9 @@ class LocalLLM:
         except Exception as exc:  # noqa: BLE001 - surfaced as service status, not swallowed silently
             return {"provider": "local", "available": False, "error": str(exc)}
 
+    def _use_thinking(self, on_progress: LlmProgressCallback | None) -> bool:
+        return self.settings.ollama_enable_thinking and on_progress is not None
+
     async def generate(
         self,
         prompt: str,
@@ -89,17 +104,46 @@ class LocalLLM:
         max_chars: int | None = None,
         translate_input: bool = True,
         timeout_seconds: float | None = None,
+        on_progress: LlmProgressCallback | None = None,
     ) -> str | None:
+        result = await self.generate_detailed(
+            prompt,
+            system=system,
+            temperature=temperature,
+            num_predict=num_predict,
+            num_ctx=num_ctx,
+            max_chars=max_chars,
+            translate_input=translate_input,
+            timeout_seconds=timeout_seconds,
+            on_progress=on_progress,
+        )
+        return result.text
+
+    async def generate_detailed(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        temperature: float = 0.2,
+        num_predict: int | None = None,
+        num_ctx: int | None = None,
+        max_chars: int | None = None,
+        translate_input: bool = True,
+        timeout_seconds: float | None = None,
+        on_progress: LlmProgressCallback | None = None,
+    ) -> LlmGenerateResult:
         max_chars = max_chars or self.settings.max_llm_context_chars
         if translate_input and self.settings.auto_translate_llm_input_to_english:
             prompt, _ = await ensure_english_for_llm(prompt, purpose="generate", provider="local")
         if system and translate_input and self.settings.auto_translate_llm_input_to_english:
             system, _ = await ensure_english_for_llm(system, purpose="generate_system", provider="local")
-        payload = {
+
+        use_thinking = self._use_thinking(on_progress)
+        payload: dict[str, Any] = {
             "model": self.settings.ollama_model,
             "prompt": prompt[:max_chars],
-            "stream": False,
-            "think": False,
+            "stream": bool(on_progress),
+            "think": use_thinking,
             "options": {
                 "temperature": temperature,
                 "num_ctx": num_ctx or self.settings.ollama_num_ctx,
@@ -110,18 +154,60 @@ class LocalLLM:
             payload["system"] = system[:max_chars]
         timeout = timeout_seconds or self.settings.llm_timeout_seconds
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(f"{self.settings.ollama_base_url}/api/generate", json=payload)
-                response.raise_for_status()
-            data = response.json()
-            text = str(data.get("response", "")).strip()
-            if not text:
-                text = str(data.get("thinking", "")).strip()
-            return text or None
+            if on_progress:
+                return await self._generate_streaming(payload, timeout=timeout, on_progress=on_progress)
+            return await self._generate_blocking(payload, timeout=timeout, use_thinking=use_thinking)
         except httpx.TimeoutException:
-            return None
+            return LlmGenerateResult(text=None)
         except Exception:
-            return None
+            return LlmGenerateResult(text=None)
+
+    async def _generate_blocking(
+        self,
+        payload: dict[str, Any],
+        *,
+        timeout: float,
+        use_thinking: bool,
+    ) -> LlmGenerateResult:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(f"{self.settings.ollama_base_url}/api/generate", json=payload)
+            response.raise_for_status()
+        data = response.json()
+        thinking = str(data.get("thinking", "")).strip()
+        text = str(data.get("response", "")).strip()
+        if not text and not use_thinking:
+            text = thinking
+            thinking = ""
+        return LlmGenerateResult(text=text or None, thinking=thinking or None)
+
+    async def _generate_streaming(
+        self,
+        payload: dict[str, Any],
+        *,
+        timeout: float,
+        on_progress: LlmProgressCallback,
+    ) -> LlmGenerateResult:
+        thinking_parts: list[str] = []
+        response_parts: list[str] = []
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST",
+                f"{self.settings.ollama_base_url}/api/generate",
+                json=payload,
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.strip():
+                        continue
+                    data = json.loads(line)
+                    if chunk := data.get("thinking"):
+                        thinking_parts.append(str(chunk))
+                    if chunk := data.get("response"):
+                        response_parts.append(str(chunk))
+                    on_progress("".join(thinking_parts), "".join(response_parts))
+        thinking = "".join(thinking_parts).strip()
+        text = "".join(response_parts).strip()
+        return LlmGenerateResult(text=text or None, thinking=thinking or None)
 
     async def embed(self, text: str) -> list[float] | None:
         if self.settings.auto_translate_llm_input_to_english:
@@ -218,7 +304,34 @@ class CursorLLM:
         max_chars: int | None = None,
         translate_input: bool = True,
         timeout_seconds: float | None = None,
+        on_progress: LlmProgressCallback | None = None,
     ) -> str | None:
+        result = await self.generate_detailed(
+            prompt,
+            system=system,
+            temperature=temperature,
+            num_predict=num_predict,
+            num_ctx=num_ctx,
+            max_chars=max_chars,
+            translate_input=translate_input,
+            timeout_seconds=timeout_seconds,
+            on_progress=on_progress,
+        )
+        return result.text
+
+    async def generate_detailed(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        temperature: float = 0.2,
+        num_predict: int | None = None,
+        num_ctx: int | None = None,
+        max_chars: int | None = None,
+        translate_input: bool = True,
+        timeout_seconds: float | None = None,
+        on_progress: LlmProgressCallback | None = None,
+    ) -> LlmGenerateResult:
         del num_ctx  # OpenAI-compatible APIs do not expose Ollama num_ctx
         max_chars = max_chars or self.settings.max_llm_context_chars
         if translate_input and self.settings.auto_translate_llm_input_to_english:
@@ -252,21 +365,27 @@ class CursorLLM:
             data = response.json()
             choices = data.get("choices")
             if not isinstance(choices, list) or not choices:
-                return None
+                return LlmGenerateResult(text=None)
             message = choices[0].get("message", {})
             if not isinstance(message, dict):
-                return None
+                return LlmGenerateResult(text=None)
             content = message.get("content")
-            if isinstance(content, str) and content.strip():
-                return content.strip()
             reasoning = message.get("reasoning_content")
-            if isinstance(reasoning, str) and reasoning.strip():
-                return reasoning.strip()
-            return None
+            thinking = reasoning.strip() if isinstance(reasoning, str) else ""
+            text = content.strip() if isinstance(content, str) else ""
+            if not text and thinking:
+                text = thinking
+                thinking = ""
+            if on_progress and (thinking or text):
+                on_progress(thinking, text)
+            return LlmGenerateResult(
+                text=text or None,
+                thinking=thinking or None,
+            )
         except httpx.TimeoutException:
-            return None
+            return LlmGenerateResult(text=None)
         except Exception:
-            return None
+            return LlmGenerateResult(text=None)
 
 
 def get_llm_client(provider: LlmProvider | str | None = None) -> LlmClient:

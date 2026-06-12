@@ -6,9 +6,16 @@ from app.services.cv_rewrite import _parse_json_response
 from app.services.ingestion import ingest_text, ingest_upload_bytes, ingest_url, validate_non_empty
 from app.services.language import ensure_english_for_llm
 from app.services.llm import get_llm_client
+from app.services.llm_progress import progress_callback_for_provider, set_llm_task_status_message
 from app.services.scoring import extract_cv_profile
 
 TitleLanguage = Literal["tr", "en"]
+
+_JOB_TITLES_SYSTEM = (
+    "You are a career search assistant. "
+    "Return ONLY valid JSON in your final answer. "
+    "Keep internal reasoning brief so the JSON response is not truncated."
+)
 
 ROLE_CANDIDATES: list[tuple[frozenset[str], list[str], list[str]]] = [
     (frozenset({"python", "fastapi", "django", "flask"}), ["Backend Developer", "Python Developer", "API Developer"], ["Backend Developer", "Python Developer", "API Developer"]),
@@ -52,7 +59,10 @@ async def suggest_job_titles(
     language: TitleLanguage = "tr",
     use_llm: bool = True,
     llm_provider: LlmProvider = "local",
+    task_id: str | None = None,
 ) -> JobTitleSuggestionsResult:
+    if task_id:
+        set_llm_task_status_message(task_id, "CV okunuyor ve profil çıkarılıyor...")
     cv_document = await _ingest_cv(cv_text, cv_url, cv_file_content, cv_filename, cv_content_type)
     validate_non_empty(cv_document, "CV")
     cv_profile = extract_cv_profile(cv_document.text)
@@ -63,18 +73,33 @@ async def suggest_job_titles(
         fallback.llm_requested = False
         return fallback
 
+    if task_id and llm_provider == "local":
+        set_llm_task_status_message(
+            task_id,
+            "CV yerel model için İngilizceye çevriliyor; bu adım birkaç dakika sürebilir.",
+        )
     cv_text_for_llm, lang_meta = await ensure_english_for_llm(
         cv_document.text, purpose="cv", provider=llm_provider
     )
-    llm_result = await _llm_suggestions(
-        cv_text_for_llm, cv_profile, current_titles, language, llm_provider=llm_provider
+    if task_id:
+        set_llm_task_status_message(task_id, "İş unvanı önerileri için model düşünmeye başlıyor...")
+    llm_result, llm_failure, llm_thinking = await _llm_suggestions(
+        cv_text_for_llm,
+        cv_profile,
+        current_titles,
+        language,
+        llm_provider=llm_provider,
+        task_id=task_id,
+        analysis_id=None,
     )
     if llm_result is None:
         warnings = list(fallback.warnings)
         provider_label = "Cursor API" if llm_provider == "cursor" else "Yerel LLM"
-        warnings.append(f"{provider_label} yanıt veremedi; beceri tabanlı deterministik unvan önerileri kullanıldı.")
+        detail = llm_failure or f"{provider_label} yanıt veremedi."
+        warnings.append(f"{detail} Beceri tabanlı deterministik unvan önerileri kullanıldı.")
         fallback.warnings = warnings
         fallback.llm_requested = True
+        fallback.llm_thinking = llm_thinking
         return fallback
 
     if lang_meta.get("was_translated"):
@@ -196,69 +221,23 @@ def _search_keywords(title: str, skills: set[str], language: TitleLanguage) -> l
     return keywords[:6]
 
 
-async def _llm_suggestions(
-    cv_text: str,
+def _extract_job_titles_payload(response: str | None, thinking: str | None) -> dict | None:
+    for text in (response, thinking):
+        if not text or not text.strip():
+            continue
+        payload = _parse_json_response(text)
+        if payload is not None and isinstance(payload.get("suggestions"), list):
+            return payload
+    return None
+
+
+def _suggestions_from_payload(
+    payload: dict,
+    *,
     profile: StructuredProfile,
     current_titles: list[str],
-    language: TitleLanguage,
-    *,
-    llm_provider: LlmProvider = "local",
+    thinking: str | None,
 ) -> JobTitleSuggestionsResult | None:
-    settings = get_settings()
-    skills = ", ".join(profile.skills[:12]) or "none"
-    highlights = "\n".join(f"- {line}" for line in profile.highlights[:6]) or "- none"
-    current = ", ".join(current_titles) or "none"
-    output_language = "Turkish" if language == "tr" else "English"
-
-    prompt = f"""
-You are a career search assistant. Based only on the CV evidence below, suggest 6-8 realistic job titles the candidate should search for on job boards.
-Do not invent skills, employers, or seniority that are not supported by the CV.
-Prefer titles that match LinkedIn/Indeed style naming.
-Include a mix of specific and slightly broader titles when justified by the CV.
-
-CV excerpt:
-{cv_text[: settings.job_title_cv_chars]}
-
-Extracted skills: {skills}
-Years of experience: {profile.years_experience if profile.years_experience is not None else "unknown"}
-Seniority signal: {profile.seniority or "unknown"}
-Current title hints from CV: {current}
-CV highlights:
-{highlights}
-
-Return ONLY valid JSON with this shape:
-{{
-  "suggestions": [
-    {{
-      "title": "Senior Backend Developer",
-      "fit_score": 88,
-      "reason": "Why this title fits the CV",
-      "search_keywords": ["Senior Backend Developer", "Python", "FastAPI"],
-      "evidence": ["short CV-based evidence"]
-    }}
-  ]
-}}
-
-Rules:
-- Write title, reason, and search_keywords in {output_language}.
-- fit_score must be an integer from 40 to 98.
-- Do not recommend titles requiring skills absent from the CV.
-- search_keywords should help the user search on LinkedIn, Indeed, or Kariyer.net.
-"""
-
-    response = await get_llm_client(llm_provider).generate(
-        prompt,
-        num_predict=settings.job_title_num_predict,
-        translate_input=False,
-        temperature=0.2,
-    )
-    if not response:
-        return None
-
-    payload = _parse_json_response(response)
-    if payload is None:
-        return None
-
     raw_items = payload.get("suggestions")
     if not isinstance(raw_items, list):
         return None
@@ -297,5 +276,146 @@ Rules:
         current_titles=current_titles,
         used_llm=True,
         llm_requested=True,
+        llm_thinking=thinking,
         warnings=[],
     )
+
+
+async def _llm_suggestions(
+    cv_text: str,
+    profile: StructuredProfile,
+    current_titles: list[str],
+    language: TitleLanguage,
+    *,
+    llm_provider: LlmProvider = "local",
+    task_id: str | None = None,
+    analysis_id: str | None = None,
+) -> tuple[JobTitleSuggestionsResult | None, str | None, str | None]:
+    settings = get_settings()
+    skills = ", ".join(profile.skills[:12]) or "none"
+    highlights = "\n".join(f"- {line}" for line in profile.highlights[:6]) or "- none"
+    current = ", ".join(current_titles) or "none"
+    output_language = "Turkish" if language == "tr" else "English"
+    provider_label = "Cursor API" if llm_provider == "cursor" else "Yerel LLM"
+    prompt = f"""
+Based only on the CV evidence below, suggest 6-8 realistic job titles the candidate should search for on job boards.
+Do not invent skills, employers, or seniority that are not supported by the CV.
+Prefer titles that match LinkedIn/Indeed style naming.
+Include a mix of specific and slightly broader titles when justified by the CV.
+
+CV excerpt:
+{cv_text[: settings.job_title_cv_chars]}
+
+Extracted skills: {skills}
+Years of experience: {profile.years_experience if profile.years_experience is not None else "unknown"}
+Seniority signal: {profile.seniority or "unknown"}
+Current title hints from CV: {current}
+CV highlights:
+{highlights}
+
+Return ONLY valid JSON with this shape:
+{{
+  "suggestions": [
+    {{
+      "title": "Senior Backend Developer",
+      "fit_score": 88,
+      "reason": "Why this title fits the CV",
+      "search_keywords": ["Senior Backend Developer", "Python", "FastAPI"],
+      "evidence": ["short CV-based evidence"]
+    }}
+  ]
+}}
+
+Rules:
+- Write title, reason, and search_keywords in {output_language}.
+- fit_score must be an integer from 40 to 98.
+- Do not recommend titles requiring skills absent from the CV.
+- search_keywords should help the user search on LinkedIn, Indeed, or Kariyer.net.
+"""
+
+    last_thinking: str | None = None
+    last_failure: str | None = None
+    for attempt in range(2):
+        num_predict = settings.job_title_num_predict if attempt == 0 else settings.job_title_num_predict + 1024
+        response, thinking = await _llm_generate_text(
+            prompt,
+            llm_provider=llm_provider,
+            num_predict=num_predict,
+            task_id=task_id,
+            analysis_id=analysis_id,
+            system=_JOB_TITLES_SYSTEM,
+            temperature=0.1 if attempt == 0 else 0.05,
+        )
+        last_thinking = thinking or last_thinking
+
+        if not response and not thinking:
+            last_failure = (
+                f"{provider_label} {int(settings.llm_analysis_timeout_seconds)} saniye içinde yanıt vermedi."
+            )
+            continue
+
+        payload = _extract_job_titles_payload(response, thinking)
+        if payload is None:
+            if not response and thinking:
+                last_failure = (
+                    f"{provider_label} düşünme tamamlandı ancak JSON yanıtı üretilemedi; "
+                    "çıktı token limitinde kesilmiş olabilir."
+                )
+            elif response:
+                last_failure = f"{provider_label} yanıt verdi ancak JSON parse edilemedi."
+            else:
+                last_failure = f"{provider_label} geçerli bir JSON yanıtı üretemedi."
+            continue
+
+        result = _suggestions_from_payload(
+            payload,
+            profile=profile,
+            current_titles=current_titles,
+            thinking=last_thinking,
+        )
+        if result is not None:
+            return result, None, last_thinking
+
+        last_failure = f"{provider_label} yanıt verdi ancak unvan önerileri eksik veya geçersiz."
+
+    return None, last_failure, last_thinking
+
+
+async def _llm_generate_text(
+    prompt: str,
+    *,
+    llm_provider: LlmProvider,
+    num_predict: int,
+    task_id: str | None = None,
+    analysis_id: str | None = None,
+    system: str | None = None,
+    temperature: float = 0.2,
+) -> tuple[str | None, str | None]:
+    settings = get_settings()
+    on_progress = progress_callback_for_provider(
+        llm_provider,
+        analysis_id=analysis_id,
+        task_id=task_id,
+    )
+    client = get_llm_client(llm_provider)
+    if hasattr(client, "generate_detailed"):
+        detailed = await client.generate_detailed(
+            prompt,
+            system=system,
+            temperature=temperature,
+            num_predict=num_predict,
+            translate_input=False,
+            timeout_seconds=settings.llm_analysis_timeout_seconds,
+            on_progress=on_progress,
+        )
+        return detailed.text, detailed.thinking
+    text = await client.generate(
+        prompt,
+        system=system,
+        temperature=temperature,
+        num_predict=num_predict,
+        translate_input=False,
+        timeout_seconds=settings.llm_analysis_timeout_seconds,
+        on_progress=on_progress,
+    )
+    return text, None

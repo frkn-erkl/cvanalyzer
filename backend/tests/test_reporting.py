@@ -107,9 +107,10 @@ def test_llm_summary_prompt_includes_quality_context(monkeypatch) -> None:
 
     monkeypatch.setattr(reporting, "get_llm_client", lambda provider=None: FakeLLM())
 
-    output = asyncio.run(llm_summary(result))
+    summary, thinking = asyncio.run(llm_summary(result))
 
-    assert output == "rapor"
+    assert summary == "rapor"
+    assert thinking is None
     prompt = str(captured["prompt"])
     assert "## Karar" in prompt
     assert "Deterministik güçlü yönler" in prompt
@@ -119,6 +120,7 @@ def test_llm_summary_prompt_includes_quality_context(monkeypatch) -> None:
         "temperature": 0.1,
         "num_predict": 700,
         "translate_input": False,
+        "on_progress": None,
     }
 
 

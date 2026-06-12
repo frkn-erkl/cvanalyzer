@@ -19,11 +19,17 @@ from app.services.latex import (
 )
 from app.services.language import ensure_english_for_llm
 from app.services.llm import get_llm_client
+from app.services.llm_progress import progress_callback_for_provider
 from app.services.pdf_export import compile_latex_to_pdf
 from app.services.reporting import build_suggested_profile_summary
 
 
-async def rewrite_cv_for_analysis(analysis_id: str, request: CvRewriteRequest) -> CvRewriteResult:
+async def rewrite_cv_for_analysis(
+    analysis_id: str,
+    request: CvRewriteRequest,
+    *,
+    task_id: str | None = None,
+) -> CvRewriteResult:
     row = db.get_analysis(analysis_id)
     if row is None or row["status"] != "completed" or row["result"] is None:
         raise ValueError("Tamamlanmış analiz bulunamadı.")
@@ -40,7 +46,7 @@ async def rewrite_cv_for_analysis(analysis_id: str, request: CvRewriteRequest) -
 
     if request.deep_rewrite and wants_latex:
         llm_result = await _llm_latex_rewrite(
-            analysis, cv_text, job_text, request, rewrite_id, llm_provider=llm_provider
+            analysis, cv_text, job_text, request, rewrite_id, llm_provider=llm_provider, task_id=task_id
         )
         if llm_result is not None:
             claims = detect_unsupported_claims(latex_to_plain_text(llm_result.updated_cv_text), analysis, cv_text)
@@ -69,6 +75,7 @@ async def rewrite_cv_for_analysis(analysis_id: str, request: CvRewriteRequest) -
             request,
             rewrite_id,
             llm_provider=llm_provider,
+            task_id=task_id,
         )
         if llm_result is not None:
             if cv_lang_meta.get("was_translated") or job_lang_meta.get("was_translated"):
@@ -190,6 +197,39 @@ def _fallback_rewrite(analysis: AnalysisResult, cv_text: str, request: CvRewrite
     )
 
 
+async def _llm_generate_text(
+    prompt: str,
+    *,
+    llm_provider: LlmProvider,
+    num_predict: int,
+    task_id: str | None = None,
+    analysis_id: str | None = None,
+) -> tuple[str | None, str | None]:
+    on_progress = progress_callback_for_provider(
+        llm_provider,
+        analysis_id=analysis_id,
+        task_id=task_id,
+    )
+    client = get_llm_client(llm_provider)
+    if hasattr(client, "generate_detailed"):
+        detailed = await client.generate_detailed(
+            prompt,
+            temperature=0.1,
+            num_predict=num_predict,
+            translate_input=False,
+            on_progress=on_progress,
+        )
+        return detailed.text, detailed.thinking
+    text = await client.generate(
+        prompt,
+        temperature=0.1,
+        num_predict=num_predict,
+        translate_input=False,
+        on_progress=on_progress,
+    )
+    return text, None
+
+
 async def _llm_rewrite(
     analysis: AnalysisResult,
     cv_text: str,
@@ -198,14 +238,16 @@ async def _llm_rewrite(
     rewrite_id: str,
     *,
     llm_provider: LlmProvider = "local",
+    task_id: str | None = None,
 ) -> CvRewriteResult | None:
     prompt = _build_prompt(analysis, cv_text, job_text, request)
     settings = get_settings()
-    response = await get_llm_client(llm_provider).generate(
+    response, thinking = await _llm_generate_text(
         prompt,
-        temperature=0.1,
+        llm_provider=llm_provider,
         num_predict=settings.cv_rewrite_num_predict,
-        translate_input=False,
+        task_id=task_id,
+        analysis_id=analysis.id,
     )
     if not response:
         return None
@@ -240,6 +282,7 @@ async def _llm_rewrite(
         warnings=warnings,
         used_llm=True,
         llm_requested=request.deep_rewrite,
+        llm_thinking=thinking,
         tone=request.tone,
         language=request.language,
     )
@@ -253,14 +296,16 @@ async def _llm_latex_rewrite(
     rewrite_id: str,
     *,
     llm_provider: LlmProvider = "local",
+    task_id: str | None = None,
 ) -> CvRewriteResult | None:
     prompt = build_latex_rewrite_prompt(cv_text, job_text, analysis, request)
     settings = get_settings()
-    response = await get_llm_client(llm_provider).generate(
+    response, thinking = await _llm_generate_text(
         prompt,
-        temperature=0.1,
+        llm_provider=llm_provider,
         num_predict=settings.cv_rewrite_num_predict,
-        translate_input=False,
+        task_id=task_id,
+        analysis_id=analysis.id,
     )
     if not response:
         return None
@@ -288,6 +333,7 @@ async def _llm_latex_rewrite(
         format_preserved=True,
         used_llm=True,
         llm_requested=request.deep_rewrite,
+        llm_thinking=thinking,
         tone=request.tone,
         language=request.language,
     )

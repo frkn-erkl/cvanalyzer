@@ -107,11 +107,27 @@ class AnalysisResult(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class LlmAnalysisProgress(BaseModel):
+    thinking: str = ""
+    response: str = ""
+    phase: Literal["thinking", "responding"] = "thinking"
+
+
 class AnalysisJob(BaseModel):
     id: str
     status: JobStatus
     error: str | None = None
     result: AnalysisResult | None = None
+    progress: LlmAnalysisProgress | None = None
+
+
+class LlmTaskJob(BaseModel):
+    id: str
+    kind: Literal["rewrite", "job_titles", "cv_edit", "cv_edit_apply"]
+    status: JobStatus
+    error: str | None = None
+    progress: LlmAnalysisProgress | None = None
+    result: dict[str, Any] | None = None
 
 
 class CvRewriteRequest(BaseModel):
@@ -154,6 +170,7 @@ class CvRewriteResult(BaseModel):
     compile_warnings: list[str] = Field(default_factory=list)
     used_llm: bool = False
     llm_requested: bool = True
+    llm_thinking: str | None = None
     tone: RewriteTone = "professional_ats"
     language: RewriteLanguage = "en"
 
@@ -171,7 +188,42 @@ class JobTitleSuggestionsResult(BaseModel):
     current_titles: list[str] = Field(default_factory=list)
     used_llm: bool = False
     llm_requested: bool = True
+    llm_thinking: str | None = None
     warnings: list[str] = Field(default_factory=list)
+
+
+class CvEditSuggestion(BaseModel):
+    category: str
+    title: str
+    recommendation: str
+    priority: Literal["high", "medium", "low"] = "medium"
+    evidence: list[str] = Field(default_factory=list)
+
+
+class CvEditSuggestionsResult(BaseModel):
+    overall_assessment: str
+    suggestions: list[CvEditSuggestion]
+    strengths: list[str] = Field(default_factory=list)
+    gaps: list[str] = Field(default_factory=list)
+    used_llm: bool = False
+    llm_requested: bool = True
+    llm_thinking: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class CvEditApplyChange(BaseModel):
+    section: str
+    reason: str
+    evidence: list[str] = Field(default_factory=list)
+
+
+class CvEditApplyResult(BaseModel):
+    updated_cv_text: str
+    changes: list[CvEditApplyChange] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    used_llm: bool = False
+    llm_requested: bool = True
+    llm_thinking: str | None = None
 
 
 JobListingSource = Literal["linkedin", "kariyer"]
@@ -216,3 +268,29 @@ class JobSearchResult(BaseModel):
     used_apify: bool = False
     sources_searched: list[JobListingSource] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+SkillGapSource = Literal["job_search", "analysis", "llm_analysis"]
+SkillGapType = Literal["required", "preferred"]
+
+
+class SkillGapListingRef(BaseModel):
+    job_key: str
+    job_title: str
+    job_url: str | None = None
+    company: str | None = None
+    source: SkillGapSource
+    last_seen_at: str | None = None
+
+
+class SkillGapAggregate(BaseModel):
+    skill_name: str
+    gap_type: SkillGapType
+    listing_count: int
+    listings: list[SkillGapListingRef] = Field(default_factory=list)
+
+
+class SkillGapSummaryResponse(BaseModel):
+    aggregates: list[SkillGapAggregate] = Field(default_factory=list)
+    total_skills: int = 0
+    total_listings: int = 0

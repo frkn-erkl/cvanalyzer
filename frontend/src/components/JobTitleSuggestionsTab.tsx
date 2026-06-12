@@ -1,8 +1,10 @@
 import { FormEvent, useState } from "react";
 import { suggestJobTitles } from "../api";
-import type { JobTitleSuggestionsResult, LlmProvider } from "../types";
+import { isLlmTaskJob, supportsLiveLocalThinking, useLlmTaskPolling } from "../hooks/useLlmTaskPolling";
+import type { JobTitleSuggestionsResult, LlmProvider, LlmTaskJob } from "../types";
 import LlmOptionToggle from "./LlmOptionToggle";
 import LlmProviderSelect from "./LlmProviderSelect";
+import LlmThinkingPanel from "./LlmThinkingPanel";
 import OutputSourceBadge, { jobTitleOutputSource } from "./OutputSourceBadge";
 import SectionHeading from "./SectionHeading";
 
@@ -20,7 +22,22 @@ export default function JobTitleSuggestionsTab({ llmProvider, onLlmProviderChang
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<JobTitleSuggestionsResult | null>(null);
+  const [task, setTask] = useState<LlmTaskJob | null>(null);
   const [copiedTitle, setCopiedTitle] = useState<string | null>(null);
+
+  const showLiveThinking = busy && supportsLiveLocalThinking(llmProvider, useLlm);
+
+  useLlmTaskPolling(task?.id, busy && Boolean(task), {
+    onUpdate: setTask,
+    onFailed: (message) => {
+      setError(message);
+      setBusy(false);
+    },
+    onComplete: (completedTask) => {
+      setResult(completedTask.result as unknown as JobTitleSuggestionsResult);
+      setBusy(false);
+    },
+  });
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -44,13 +61,18 @@ export default function JobTitleSuggestionsTab({ llmProvider, onLlmProviderChang
     setBusy(true);
     setError(null);
     setCopiedTitle(null);
+    setTask(null);
     try {
       const response = await suggestJobTitles(data);
+      if (isLlmTaskJob(response)) {
+        setTask(response);
+        return;
+      }
       setResult(response);
+      setBusy(false);
     } catch (submitError) {
       setResult(null);
       setError(submitError instanceof Error ? submitError.message : "İş unvanı önerileri alınamadı.");
-    } finally {
       setBusy(false);
     }
   }
@@ -112,7 +134,18 @@ export default function JobTitleSuggestionsTab({ llmProvider, onLlmProviderChang
         </button>
       </form>
 
+      {showLiveThinking && (
+        <LlmThinkingPanel
+          live
+          progress={task?.progress}
+          waiting={!task?.progress?.thinking && !task?.progress?.response}
+          waitingMessage="CV hazırlanıyor; Türkçe CV'ler önce İngilizceye çevrilir, ardından model unvan önerileri üretir. Bu birkaç dakika sürebilir."
+        />
+      )}
+
       {error && <p className="error">{error}</p>}
+
+      {result?.llm_thinking && !busy && <LlmThinkingPanel storedThinking={result.llm_thinking} />}
 
       {result && (
         <section className="results job-title-results">

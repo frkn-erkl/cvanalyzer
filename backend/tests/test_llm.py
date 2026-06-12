@@ -169,6 +169,69 @@ def test_generate_accepts_quality_options(monkeypatch) -> None:
     assert payload["options"]["num_ctx"] == 2048
 
 
+def test_generate_enables_thinking_when_progress_callback_provided(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    chunks = [
+        '{"thinking":"Adım 1","response":"","done":false}',
+        '{"thinking":"","response":"{\\"ok\\":true}","done":true}',
+    ]
+
+    class FakeStreamResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_lines(self):
+            for chunk in chunks:
+                yield chunk
+
+    class FakeClient:
+        def __init__(self, *, timeout: float) -> None:
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def stream(self, method: str, url: str, json: dict):
+            captured["json"] = json
+            captured["url"] = url
+
+            class StreamContext:
+                async def __aenter__(self_inner):
+                    return FakeStreamResponse()
+
+                async def __aexit__(self_inner, exc_type, exc, tb) -> None:
+                    return None
+
+            return StreamContext()
+
+    progress_updates: list[tuple[str, str]] = []
+
+    def on_progress(thinking: str, response: str) -> None:
+        progress_updates.append((thinking, response))
+
+    monkeypatch.setattr(llm.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(llm, "ensure_english_for_llm", lambda text, **kwargs: (text, {}))
+    settings = llm.get_settings()
+    monkeypatch.setattr(settings, "ollama_enable_thinking", True)
+
+    result = asyncio.run(
+        llm.LocalLLM().generate_detailed(
+            "prompt",
+            translate_input=False,
+            on_progress=on_progress,
+        )
+    )
+
+    assert captured["json"]["think"] is True
+    assert captured["json"]["stream"] is True
+    assert result.text == '{"ok":true}'
+    assert result.thinking == "Adım 1"
+    assert progress_updates[-1] == ("Adım 1", '{"ok":true}')
+
+
 def test_get_llm_client_defaults_to_local() -> None:
     client = llm.get_llm_client()
     assert isinstance(client, llm.LocalLLM)

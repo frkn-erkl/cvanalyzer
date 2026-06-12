@@ -4,10 +4,14 @@ import AnalysisForm from "./components/AnalysisForm";
 import AnalysisResult from "./components/AnalysisResult";
 import JobSearchTab from "./components/JobSearchTab";
 import JobTitleSuggestionsTab from "./components/JobTitleSuggestionsTab";
+import CvEditTab from "./components/CvEditTab";
+import SkillSuggestionsTab from "./components/SkillSuggestionsTab";
+import LlmThinkingPanel from "./components/LlmThinkingPanel";
 import StatusPanel from "./components/StatusPanel";
+import { supportsLiveLocalThinking } from "./hooks/useLlmTaskPolling";
 import type { AnalysisJob, LlmProvider } from "./types";
 
-type AppTab = "analysis" | "llm-analysis" | "job-titles" | "job-search";
+type AppTab = "analysis" | "llm-analysis" | "job-titles" | "job-search" | "skill-suggestions" | "cv-edit";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<AppTab>("analysis");
@@ -23,15 +27,32 @@ export default function App() {
   const [prefilledJobUrl, setPrefilledJobUrl] = useState("");
 
   useEffect(() => {
-    getLlmHealth(llmProvider)
-      .then(setLlmHealth)
-      .catch((healthError) =>
-        setLlmHealth({
-          available: false,
-          provider: llmProvider,
-          error: healthError instanceof Error ? healthError.message : "Backend bağlantısı kurulamadı",
-        }),
-      );
+    let cancelled = false;
+
+    const refreshHealth = () => {
+      getLlmHealth(llmProvider)
+        .then((health) => {
+          if (!cancelled) {
+            setLlmHealth(health);
+          }
+        })
+        .catch((healthError) => {
+          if (!cancelled) {
+            setLlmHealth({
+              available: false,
+              provider: llmProvider,
+              error: healthError instanceof Error ? healthError.message : "Backend bağlantısı kurulamadı",
+            });
+          }
+        });
+    };
+
+    refreshHealth();
+    const handle = window.setInterval(refreshHealth, 8000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(handle);
+    };
   }, [llmProvider]);
 
   useEffect(() => {
@@ -49,12 +70,17 @@ export default function App() {
   }, [activeTab]);
 
   useEffect(() => {
-    if (!job?.id || !["queued", "running"].includes(job.status)) {
+    if (!job?.id || job.id === "local" || !busy) {
       return;
     }
-    const handle = window.setInterval(async () => {
+    let cancelled = false;
+
+    async function poll() {
       try {
-        const next = await getAnalysis(job.id);
+        const next = await getAnalysis(job!.id);
+        if (cancelled) {
+          return;
+        }
         setJob(next);
         if (next.status === "failed") {
           setError(next.error ?? "Analiz başarısız oldu.");
@@ -64,20 +90,35 @@ export default function App() {
           setBusy(false);
         }
       } catch (pollError) {
+        if (cancelled) {
+          return;
+        }
         setError(pollError instanceof Error ? pollError.message : "Analiz durumu alınamadı.");
-        setBusy(false);
       }
-    }, 1500);
-    return () => window.clearInterval(handle);
-  }, [job?.id, job?.status]);
+    }
+
+    void poll();
+    const handle = window.setInterval(() => {
+      void poll();
+    }, 800);
+    return () => {
+      cancelled = true;
+      window.clearInterval(handle);
+    };
+  }, [job?.id, busy]);
 
   useEffect(() => {
-    if (!llmJob?.id || !["queued", "running"].includes(llmJob.status)) {
+    if (!llmJob?.id || llmJob.id === "local" || !llmBusy) {
       return;
     }
-    const handle = window.setInterval(async () => {
+    let cancelled = false;
+
+    async function poll() {
       try {
-        const next = await getAnalysis(llmJob.id);
+        const next = await getAnalysis(llmJob!.id);
+        if (cancelled) {
+          return;
+        }
         setLlmJob(next);
         if (next.status === "failed") {
           setLlmError(next.error ?? "LLM analizi başarısız oldu.");
@@ -87,12 +128,22 @@ export default function App() {
           setLlmBusy(false);
         }
       } catch (pollError) {
+        if (cancelled) {
+          return;
+        }
         setLlmError(pollError instanceof Error ? pollError.message : "LLM analiz durumu alınamadı.");
-        setLlmBusy(false);
       }
-    }, 1500);
-    return () => window.clearInterval(handle);
-  }, [llmJob?.id, llmJob?.status]);
+    }
+
+    void poll();
+    const handle = window.setInterval(() => {
+      void poll();
+    }, 800);
+    return () => {
+      cancelled = true;
+      window.clearInterval(handle);
+    };
+  }, [llmJob?.id, llmBusy]);
 
   async function handleSubmit(formData: FormData) {
     setBusy(true);
@@ -164,6 +215,16 @@ export default function App() {
           <button type="button" className={activeTab === "job-search" ? "active" : ""} onClick={() => setActiveTab("job-search")}>
             İlan Arama
           </button>
+          <button
+            type="button"
+            className={activeTab === "skill-suggestions" ? "active" : ""}
+            onClick={() => setActiveTab("skill-suggestions")}
+          >
+            Yetenek Önerisi
+          </button>
+          <button type="button" className={activeTab === "cv-edit" ? "active" : ""} onClick={() => setActiveTab("cv-edit")}>
+            CV Düzenleme
+          </button>
         </div>
       </header>
 
@@ -178,6 +239,13 @@ export default function App() {
                 onSubmit={handleSubmit}
                 busy={busy}
               />
+              {busy && supportsLiveLocalThinking(llmProvider, true) && job?.progress && (
+                <LlmThinkingPanel
+                  live
+                  progress={job.progress}
+                  waiting={!job.progress.thinking && !job.progress.response}
+                />
+              )}
               {job?.result && <AnalysisResult llmProvider={llmProvider} result={job.result} />}
             </>
           ) : activeTab === "llm-analysis" ? (
@@ -193,10 +261,24 @@ export default function App() {
                 showLlmToggle={false}
                 submitLabel="LLM Analizini Başlat"
               />
+              {llmBusy && supportsLiveLocalThinking(llmProvider, true) && (
+                <LlmThinkingPanel
+                  live
+                  progress={llmJob?.progress}
+                  waiting={!llmJob?.progress?.thinking && !llmJob?.progress?.response}
+                />
+              )}
+              {!llmBusy && llmJob?.progress?.thinking && llmJob.status === "failed" && (
+                <LlmThinkingPanel progress={llmJob.progress} />
+              )}
               {llmJob?.result && <AnalysisResult llmProvider={llmProvider} result={llmJob.result} />}
             </>
           ) : activeTab === "job-search" ? (
             <JobSearchTab llmProvider={llmProvider} onAnalyzeJob={handleAnalyzeListing} onLlmProviderChange={setLlmProvider} />
+          ) : activeTab === "skill-suggestions" ? (
+            <SkillSuggestionsTab />
+          ) : activeTab === "cv-edit" ? (
+            <CvEditTab llmProvider={llmProvider} onLlmProviderChange={setLlmProvider} />
           ) : (
             <JobTitleSuggestionsTab llmProvider={llmProvider} onLlmProviderChange={setLlmProvider} />
           )}
@@ -211,7 +293,11 @@ export default function App() {
                 ? "job-titles"
                 : activeTab === "job-search"
                   ? "job-search"
-                  : "hybrid"
+                  : activeTab === "skill-suggestions"
+                    ? "skill-suggestions"
+                    : activeTab === "cv-edit"
+                      ? "cv-edit"
+                      : "hybrid"
           }
           showApify={activeTab === "job-search"}
           status={activeTab === "analysis" ? job?.status : activeTab === "llm-analysis" ? llmJob?.status : undefined}

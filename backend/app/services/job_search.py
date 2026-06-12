@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 from typing import Literal
 
 from app.config import LlmProvider, get_settings
-from app.db import get_cached_text, set_cached_text
 from app.models import JobListingMatch, JobSearchResult
 from app.services.apify_client import ApifyClient, ApifyError
-from app.services.apify_utils import apify_actor_fingerprint, effective_use_apify
+from app.services.apify_utils import effective_use_apify
 from app.services.ingestion import ingest_text, ingest_upload_bytes, ingest_url, validate_non_empty
 from app.services.job_listings import (
     JobListingCandidate,
@@ -19,9 +17,9 @@ from app.services.job_listings import (
 )
 from app.services.job_titles import suggest_job_titles
 from app.services.scoring import build_skill_matches, extract_cv_profile, extract_job_profile, score_match
+from app.services.skill_gaps import record_job_search_listings
 
 JobSearchSource = Literal["linkedin", "kariyer"]
-JOB_SEARCH_CACHE_VERSION = "job-search-v8"
 
 NON_TECH_TITLE_TERMS = (
     "gayrimenkul",
@@ -245,6 +243,9 @@ async def search_jobs(
     language: Literal["tr", "en"] = "tr",
     use_llm: bool = False,
     llm_provider: LlmProvider = "local",
+    search_queries_override: list[str] | None = None,
+    location_override: str | None = None,
+    apify_run_inputs_override: dict[str, dict] | None = None,
 ) -> JobSearchResult:
     settings = get_settings()
     context = await _prepare_job_search(
@@ -260,12 +261,20 @@ async def search_jobs(
         use_llm=use_llm,
         llm_provider=llm_provider,
     )
-    search_queries = context["search_queries"]
+    search_queries = _apply_search_queries_override(context["search_queries"], search_queries_override)
+    effective_location = location_override.strip() if location_override and location_override.strip() else context["location"]
     warnings = list(context["warnings"])
     normalized_sources = context["normalized_sources"]
     max_per_source = context["max_per_source"]
     cv_document = context["cv_document"]
     cv_profile = context["cv_profile"]
+
+    if search_queries_override:
+        warnings.append("Arama sorguları önizleme ekranından manuel olarak düzenlendi.")
+    if location_override and location_override.strip():
+        warnings.append("Konum önizleme ekranından manuel olarak düzenlendi.")
+    if apify_run_inputs_override:
+        warnings.append("Apify actor girdileri önizleme ekranından manuel olarak düzenlendi.")
 
     if not use_apify:
         return JobSearchResult(
@@ -286,24 +295,14 @@ async def search_jobs(
             warnings=[*warnings, apify_warning or "Apify kullanılamıyor."],
         )
 
-    cache_key = _search_cache_key(
-        cv_document.cache_key,
-        normalized_sources,
-        search_queries,
-        location,
-        max_per_source,
-        apify_actor_fingerprint(),
-    )
-    cached = get_cached_text(cache_key)
-    if cached:
-        import json
-
-        payload = json.loads(cached[0])
-        return JobSearchResult.model_validate(payload)
-
     client = ApifyClient()
     candidates, source_warnings, apify_invoked = await _fetch_candidates(
-        client, normalized_sources, search_queries, location, max_per_source
+        client,
+        normalized_sources,
+        search_queries,
+        effective_location,
+        max_per_source,
+        run_inputs_override=apify_run_inputs_override,
     )
     warnings.extend(source_warnings)
     ranked = await _rank_candidates(cv_document.text, cv_profile, candidates, search_queries)
@@ -311,15 +310,27 @@ async def search_jobs(
         warnings.append(
             f"Apify {len(candidates)} ilan döndürdü ancak CV profiline uygun sonuç kalmadı; filtreler sıkılaştırıldı."
         )
-    result = JobSearchResult(
-        listings=ranked[: max_per_source * max(1, len(normalized_sources))],
+    listings = ranked[: max_per_source * max(1, len(normalized_sources))]
+    record_job_search_listings(listings)
+    return JobSearchResult(
+        listings=listings,
         search_queries=search_queries,
         used_apify=apify_invoked,
         sources_searched=normalized_sources,
         warnings=warnings,
     )
-    set_cached_text(cache_key, result.model_dump_json(), {"source": "job_search", "count": len(result.listings)})
-    return result
+
+
+def _apply_search_queries_override(
+    generated: list[str],
+    override: list[str] | None,
+) -> list[str]:
+    if not override:
+        return generated
+    from app.services.job_listings import _sanitize_search_queries
+
+    sanitized = _sanitize_search_queries(override)
+    return sanitized or generated
 
 
 async def _fetch_candidates(
@@ -328,36 +339,41 @@ async def _fetch_candidates(
     search_queries: list[str],
     location: str | None,
     max_results: int,
+    *,
+    run_inputs_override: dict[str, dict] | None = None,
 ) -> tuple[list[JobListingCandidate], list[str], bool]:
     settings = get_settings()
     warnings: list[str] = []
     tasks = []
+    overrides = run_inputs_override or {}
     for source in sources:
         if source == "linkedin" and settings.apify_linkedin_search_actor_id.strip():
+            run_input = overrides.get("linkedin") or build_linkedin_search_input(
+                queries=search_queries,
+                location=location,
+                max_results=max_results,
+            )
             tasks.append(
                 _run_source_search(
                     client,
                     source="linkedin",
                     actor_id=settings.apify_linkedin_search_actor_id,
-                    run_input=build_linkedin_search_input(
-                        queries=search_queries,
-                        location=location,
-                        max_results=max_results,
-                    ),
+                    run_input=run_input,
                     normalizer=normalize_linkedin_items,
                 )
             )
         elif source == "kariyer" and settings.apify_kariyer_search_actor_id.strip():
+            run_input = overrides.get("kariyer") or build_kariyer_search_input(
+                queries=search_queries,
+                location=location,
+                max_results=max_results,
+            )
             tasks.append(
                 _run_source_search(
                     client,
                     source="kariyer",
                     actor_id=settings.apify_kariyer_search_actor_id,
-                    run_input=build_kariyer_search_input(
-                        queries=search_queries,
-                        location=location,
-                        max_results=max_results,
-                    ),
+                    run_input=run_input,
                     normalizer=normalize_kariyer_items,
                 )
             )
@@ -591,30 +607,6 @@ def _normalize_sources(sources: list[JobSearchSource]) -> list[JobSearchSource]:
         if source in {"linkedin", "kariyer"} and source not in normalized:
             normalized.append(source)
     return normalized or ["linkedin", "kariyer"]
-
-
-def _search_cache_key(
-    cv_cache_key: str,
-    sources: list[JobSearchSource],
-    queries: list[str],
-    location: str | None,
-    max_results: int,
-    actor_fingerprint: str,
-) -> str:
-    digest = hashlib.sha256(
-        "|".join(
-            [
-                cv_cache_key,
-                ",".join(sources),
-                ",".join(queries),
-                location or "",
-                str(max_results),
-                actor_fingerprint,
-                JOB_SEARCH_CACHE_VERSION,
-            ]
-        ).encode("utf-8")
-    ).hexdigest()
-    return f"job-search:{digest}"
 
 
 async def _ingest_cv(

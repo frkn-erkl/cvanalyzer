@@ -42,6 +42,13 @@ export function jobTitleOutputSource(llmRequested: boolean, usedLlm: boolean): O
   return usedLlm ? "llm" : "fallback";
 }
 
+export function cvEditOutputSource(llmRequested: boolean, usedLlm: boolean): OutputSourceKind {
+  if (!llmRequested) {
+    return "skipped";
+  }
+  return usedLlm ? "llm" : "fallback";
+}
+
 export type AnalysisOutputSources = {
   summary?: "llm" | "fallback" | "skipped";
   domain_scoring?: "embedding" | "keyword_fallback" | "llm";

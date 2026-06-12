@@ -405,16 +405,36 @@ Zorunlu çıktı başlıkları (sırayla):
 """
 
 
-async def llm_summary(result: AnalysisResult, *, llm_provider: LlmProvider = "local") -> str | None:
+async def llm_summary(
+    result: AnalysisResult,
+    *,
+    llm_provider: LlmProvider = "local",
+    analysis_id: str | None = None,
+) -> tuple[str | None, str | None]:
+    from app.services.llm_progress import analysis_progress_callback
+
     client = get_llm_client(llm_provider)
     settings = get_settings()
-    return await client.generate(
+    on_progress = analysis_progress_callback(analysis_id) if analysis_id else None
+    if hasattr(client, "generate_detailed"):
+        detailed = await client.generate_detailed(
+            _build_llm_summary_prompt(result),
+            system=_LLM_SUMMARY_SYSTEM,
+            temperature=0.1,
+            num_predict=settings.llm_summary_num_predict,
+            translate_input=False,
+            on_progress=on_progress,
+        )
+        return detailed.text, detailed.thinking
+    text = await client.generate(
         _build_llm_summary_prompt(result),
         system=_LLM_SUMMARY_SYSTEM,
         temperature=0.1,
         num_predict=settings.llm_summary_num_predict,
         translate_input=False,
+        on_progress=on_progress,
     )
+    return text, None
 
 
 def _bullet_context(values: list[str], *, empty_label: str = "none") -> str:

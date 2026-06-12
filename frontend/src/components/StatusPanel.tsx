@@ -4,7 +4,7 @@ type Props = {
   llmHealth?: Record<string, unknown> | null;
   apifyHealth?: Record<string, unknown> | null;
   llmProvider?: "local" | "cursor";
-  mode?: "hybrid" | "llm-only" | "job-titles" | "job-search";
+  mode?: "hybrid" | "llm-only" | "job-titles" | "job-search" | "skill-suggestions" | "cv-edit";
   showApify?: boolean;
 };
 
@@ -66,8 +66,11 @@ export default function StatusPanel({
       {llmProvider === "local" && !llmAvailable && missingModels.length > 0 && (
         <p className="warn">Eksik model: {missingModels.join(", ")}</p>
       )}
-      {typeof llmHealth?.error === "string" && !llmAvailable && (
+      {!llmAvailable && typeof llmHealth?.error === "string" && (
         <p className="hint">{llmHealth.error}</p>
+      )}
+      {!llmAvailable && !llmHealth?.error && (
+        <p className="hint">Backend veya LLM sağlık kontrolü yanıt vermedi. Backend penceresinin açık olduğundan emin olun.</p>
       )}
       {typeof llmHealth?.warning === "string" && (
         <p className="hint">{llmHealth.warning}</p>
@@ -83,7 +86,7 @@ export default function StatusPanel({
             <strong className={apifyKeyConfigured ? "ok" : "warn"}>{apifyKeyConfigured ? "tanımlı" : "tanımlı değil"}</strong>
           </p>
           {typeof apifyHealth?.error === "string" && !apifyAvailable && <p className="hint">{apifyHealth.error}</p>}
-          {!apifyKeyConfigured && (
+          {apifyAvailable && !apifyKeyConfigured && (
             <p className="hint">
               `backend/.env` dosyasına <code>APIFY_API_TOKEN=...</code>, <code>APIFY_ENABLED=true</code> ve actor ID&apos;lerini ekleyin.
             </p>
@@ -117,6 +120,15 @@ export default function StatusPanel({
         </p>
       ) : mode === "job-titles" ? (
         <p className="hint">İş unvanı önerileri LLM açıkken seçilen sağlayıcıdan, kapalıyken deterministik kurallardan üretilir.</p>
+      ) : mode === "skill-suggestions" ? (
+        <p className="hint">
+          Yetenek Önerisi sekmesi İlan Arama ve analiz sonuçlarındaki eksik yetenekleri yerel veritabanında biriktirir.
+        </p>
+      ) : mode === "cv-edit" ? (
+        <p className="hint">
+          CV Düzenleme sekmesinde önce serbest yönlendirme ile öneriler üretilir. LLM açıkken öneriler sonrası tüm CV
+          metnini düzenleme adımı da kullanılabilir; kapalıyken yalnızca temel profil tabanlı öneriler verilir.
+        </p>
       ) : null}
     </aside>
   );

@@ -9,6 +9,7 @@ from app.services.ingestion import (
     ingest_url,
     validate_non_empty,
 )
+from app.services.llm_progress import merge_thinking_metadata
 from app.services.reporting import (
     build_cv_add_suggestions,
     build_suggested_profile_summary,
@@ -16,6 +17,7 @@ from app.services.reporting import (
     llm_summary,
 )
 from app.services.scoring import build_skill_matches, extract_cv_profile, extract_job_profile, score_match
+from app.services.skill_gaps import record_analysis_gaps
 
 
 def _apify_job_warnings(job_document) -> list[str]:
@@ -120,8 +122,24 @@ async def run_analysis(
             },
         )
         if deep_analysis:
-            result.llm_summary = await llm_summary(result, llm_provider=llm_provider)
+            db.update_analysis_progress(
+                analysis_id,
+                {"thinking": "", "response": "", "phase": "thinking"},
+            )
+            summary, thinking = await llm_summary(
+                result,
+                llm_provider=llm_provider,
+                analysis_id=analysis_id,
+            )
+            result.llm_summary = summary
             output_sources["summary"] = "llm" if result.llm_summary else "fallback"
+            result.metadata = merge_thinking_metadata(result.metadata, thinking)
+        record_analysis_gaps(
+            result=result,
+            job_metadata=job_document.metadata,
+            job_text=job_document.text,
+            source="analysis",
+        )
         db.update_analysis(analysis_id, "completed", result=result.model_dump())
     except Exception as exc:  # noqa: BLE001 - persisted for UI visibility
         db.update_analysis(analysis_id, "failed", error=str(exc))

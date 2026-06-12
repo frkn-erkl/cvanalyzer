@@ -161,7 +161,7 @@ def test_run_llm_analysis_fails_without_llm_response(monkeypatch) -> None:
         return None, (
             "Yerel LLM 360 saniye içinde yanıt vermedi. "
             "Analiz büyük CV/ilan metinlerinde birkaç dakika sürebilir; tekrar deneyin veya metni kısaltın."
-        )
+        ), None
 
     async def fake_translate(text: str, *, purpose: str, provider=None):
         return text, {}
@@ -201,7 +201,7 @@ def test_run_llm_analysis_completes_with_valid_llm_payload(monkeypatch) -> None:
         captured["error"] = error
 
     async def fake_generate(*args, **kwargs):
-        return SAMPLE_LLM_PAYLOAD, None
+        return SAMPLE_LLM_PAYLOAD, None, "Model aday uygunluğunu değerlendiriyor."
 
     async def fake_translate(text: str, *, purpose: str, provider=None):
         return text, {}
